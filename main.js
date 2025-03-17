@@ -84,7 +84,6 @@ function getAudioRows() {
       if (songNameText.includes(inputSongName)) {
         foundSong = songName
         break
-
       }
     }
 
@@ -105,84 +104,164 @@ function getAudioRows() {
   }
 }
 
-async function main() {
-  // Пролистываем страницу до самого низа, чтобы подгрузить названия всех песен.
-  // По какой-то причине, перемотка страницы не работает внутри функции, поэтому
-  // весь код я запускаю здесь как есть. Это неудобно читать, но зато оно работает.
-  // Возможно, это как-то связано с асинхронностью.
+/**
+ * Функция для проверки и обработки капчи
+ */
+async function handleCaptcha() {
+  // Проверяем, есть ли капча на странице
+  const captchaBox = document.querySelector('.captcha');
+  if (captchaBox) {
+    console.log("%c⚠️ ОБНАРУЖЕНА КАПЧА! Пожалуйста, введите капчу и нажмите кнопку подтверждения", "color: red; font-size: 16px; font-weight: bold;");
+    
+    // Создаем промис, который будет разрешен, когда капча будет введена
+    return new Promise(resolve => {
+      // Проверяем состояние капчи каждые 500 мс
+      const checkInterval = setInterval(() => {
+        // Если капча больше не отображается, считаем, что она введена
+        if (!document.querySelector('.captcha')) {
+          clearInterval(checkInterval);
+          console.log("%c✅ Капча введена! Продолжаем работу...", "color: green; font-size: 14px;");
+          resolve();
+        }
+      }, 500);
+    });
+  }
+  return Promise.resolve(); // Если капчи нет, сразу разрешаем промис
+}
 
-  let prevAudioRow = undefined
+/**
+ * Отправка запроса с обработкой капчи
+ */
+async function sendRequestWithCaptchaHandling(song) {
+  let success = false;
+  let attempts = 0;
+  const maxAttempts = 3;
+  
+  while (!success && attempts < maxAttempts) {
+    attempts++;
+    try {
+      // Отправляем POST запрос на сервера VK
+      const response = await new Promise((resolve, reject) => {
+        window.ajax.post(
+          "/al_audio.php?act=add",
+          song,
+          {
+            onDone: (response) => resolve(response),
+            onFail: (error) => reject(error)
+          }
+        );
+      });
+      
+      success = true;
+    } catch (error) {
+      console.log(`Ошибка при добавлении песни: ${error}`);
+    }
+    
+    // Проверяем наличие капчи и обрабатываем её
+    await handleCaptcha();
+    
+    if (!success && attempts < maxAttempts) {
+      console.log(`Повторная попытка добавления песни (${attempts}/${maxAttempts})...`);
+      await sleep(2000); // Небольшая пауза перед повторной попыткой
+    }
+  }
+  
+  return success;
+}
+
+/**
+ * Наблюдатель за изменениями в DOM для обнаружения капчи
+ */
+function setupCaptchaObserver() {
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.addedNodes.length) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            // Проверяем, является ли добавленный элемент капчей или содержит её
+            if (node.classList?.contains('captcha') || node.querySelector('.captcha')) {
+              console.log("%c⚠️ ОБНАРУЖЕНА КАПЧА! Пожалуйста, введите капчу и нажмите кнопку подтверждения", "color: red; font-size: 16px; font-weight: bold;");
+            }
+          }
+        }
+      }
+    }
+  });
+
+  // Начинаем наблюдение за всем документом
+  observer.observe(document.body, { childList: true, subtree: true });
+  return observer;
+}
+
+async function main() {
+  // Устанавливаем наблюдатель за капчей
+  const captchaObserver = setupCaptchaObserver();
+  
+  // Пролистываем страницу до самого низа, чтобы подгрузить названия всех песен.
+  let prevAudioRow = undefined;
 
   while (true) {
-    const apLayer = document.querySelector("div.ap_layer")
-    const audioRows = apLayer.querySelectorAll("div.audio_row")
-    const currAudioRow = audioRows[audioRows.length - 1]
+    const apLayer = document.querySelector("div.ap_layer");
+    const audioRows = apLayer.querySelectorAll("div.audio_row");
+    const currAudioRow = audioRows[audioRows.length - 1];
 
     if (currAudioRow === prevAudioRow) {
       console.log("ДОШЕЛ ДО КОНЦА ПЛЕЙЛИСТА");
-      break
+      break;
     } else {
-      currAudioRow.scrollIntoView()
-      prevAudioRow = currAudioRow
-      await sleep(SLEEP_BEFORE_NEXT_PAGE_SCROLL)
+      currAudioRow.scrollIntoView();
+      prevAudioRow = currAudioRow;
+      await sleep(SLEEP_BEFORE_NEXT_PAGE_SCROLL);
     }
   }
 
-  const audioRows = getAudioRows()
+  const audioRows = getAudioRows();
 
   /**
    * Создаём массив, в котором будут хранится объекты с данными, необходимыми
    * для отправки запроса о добавлении песни в избранное.
    */
-  const songs = []
+  const songs = [];
 
   /**
    * Распиливаем атрибут "data-audio" на нужные нам данные и молимся,
    * чтобы VK однажды не поменял индексы элементов.
    */
   audioRows.forEach((audio) => {
-    const dataAudioRaw = audio.getAttribute("data-audio")
-    const dataAudioJSON = JSON.parse(dataAudioRaw)
+    const dataAudioRaw = audio.getAttribute("data-audio");
+    const dataAudioJSON = JSON.parse(dataAudioRaw);
     songs.push({
       "audio_id": Number(dataAudioJSON[INDEX_OF_AUDIO_ID]),
       "audio_owner_id": Number(dataAudioJSON[INDEX_OF_AUDIO_OWNER_ID]),
       "hash": getHash(dataAudioJSON[INDEX_OF_HASH])
-    })
-  })
+    });
+  });
 
   // Проходимся по массиву в обратном порядке, чтобы музыка осталась в той же последовательности
-  songs.reverse()
+  songs.reverse();
 
-  console.log("ДОБАВЛЕНИЕ ПЕСЕН НАЧАТО, не закрывайте браузер");
+  console.log("%c ДОБАВЛЕНИЕ ПЕСЕН НАЧАТО, не закрывайте браузер", "color: blue; font-size: 14px; font-weight: bold;");
+  console.log(`Всего песен для добавления: ${songs.length}`);
 
+  let successCount = 0;
   for (let i = 0; i < songs.length; i++) {
-    // Отправляем POST запрос на сервера VK
-    window.ajax.post(
-      "/al_audio.php?act=add",
-      songs[i],
-      {}
-    )
-    /**
-     * Отдыхаем SLEEP_BEFORE_NEXT_POST_REQUEST миллисекунд после каждого запроса,
-     * чтобы пришедший с запоздание или опережением запрос не изменил порядок добавления
-     * песен. Возможно, это же можно сделать более производительно, избавившись
-     * от засыпания. Pull request will be much appreciated, так сказать.
-     *
-     * Добавляем в время случайности, чтобы обойти капчу.
-     */
-    await sleep(SLEEP_BEFORE_NEXT_POST_REQUEST + getRandomNumber(2050, 3498))
+    console.log(`Добавление песни ${i+1}/${songs.length}...`);
+    
+    // Отправляем запрос с обработкой капчи
+    const success = await sendRequestWithCaptchaHandling(songs[i]);
+    
+    if (success) {
+      successCount++;
+    }
+    
+    // Добавляем случайную задержку между запросами
+    await sleep(SLEEP_BEFORE_NEXT_POST_REQUEST + getRandomNumber(2050, 3498));
   }
-  setTimeout(() => {console.log("ДОБАВЛЕНИЕ ПЕСЕН ЗАВЕРШЕНО");}, 3000)
+  
+  console.log(`%c ДОБАВЛЕНИЕ ПЕСЕН ЗАВЕРШЕНО. Успешно добавлено: ${successCount}/${songs.length}`, "color: green; font-size: 14px; font-weight: bold;");
+  
+  // Отключаем наблюдатель за капчей
+  captchaObserver.disconnect();
 }
 
-await main()
-
-/**
- * У кода есть проблемы с появлением каптчи. Пока что это решается задержкой между добавлением песен.
- * С данной задержкой каптча не появляется, что было проверенно на плейлисте из 105 песен.
- * Есть вероятность, что, если песен будет больше, то задержка не спасёт.
- *
- * TODO: Добавить приостановку добавления песен при получении каптчи от сервера.
- * TODO: Велечину задержки можно уменьшит, оптимизирорав этим время работы скрипта.
- * TODO: Добавить проверку наличия добавляемой песни в списке аудиозаписей.
- */
+await main();
